@@ -13,3 +13,13 @@ depuración) publicado)
 El frontend es el único punto de entrada: nadie le habla a la base
 directamente, y a la API le habla el frontend.
 
+
+## TP 2 - Optimización de Imágenes y Multi-stage Builds 
+
+### Tabla Comparativa de Tamaños 
+
+| Imagen | Tag | Estrategia / Base | Tamaño Final | 
+| :--- | :--- | :--- | :--- | 
+| \`reservas-api\` | \`ingenuo\` | Monolítica (\`node:20\`) | 402 MB | 
+| \`reservas-api\` | \`v1\` | Multi-etapa (\`node:20-alpine\` + \`npm ci --omit=dev\`) | 50 MB | 
+| \`reservas-frontend\` | \`v1\` | Multi-etapa (\`node:20-alpine\` -&gt; \`nginx-unprivileged\`) | 21 MB |
