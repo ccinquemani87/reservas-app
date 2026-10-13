@@ -19,8 +19,14 @@ services:
       timeout: 5s 
       retries: 20 
       start_period: 40s 
-  
-
+    # ... configuración existente ... 
+    cap_drop: 
+      - ALL
+    # ... 
+    cap_add: 
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
   reservas-api: 
     container_name: reservas-api 
     build: 
@@ -51,8 +57,10 @@ services:
       start_period: 15s 
     depends_on: 
       reservas-db: 
-        condition: service_healthy 
-
+        condition: service_healthy
+    # ... configuración existente ... 
+    cap_drop: 
+      - ALL
 
   reservas-frontend: 
     container_name: reservas-frontend 
@@ -74,7 +82,10 @@ services:
       start_period: 5s 
     depends_on: 
       reservas-api: 
-        condition: service_healthy 
+        condition: service_healthy
+    # ... configuración existente ... 
+    cap_drop: 
+      - ALL
 
 
 networks: 
