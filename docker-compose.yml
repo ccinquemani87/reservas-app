@@ -1,0 +1,86 @@
+services: 
+  reservas-db: 
+    container_name: reservas-db 
+    image: mysql:8.4 
+    environment: 
+      MYSQL_DATABASE: reservasdb 
+      MYSQL_USER: reservas_user 
+      MYSQL_PASSWORD: reservas_pass 
+      MYSQL_ROOT_PASSWORD: reservas_root_pass 
+    volumes: 
+      - reservas-db-data:/var/lib/mysql 
+    networks: 
+      - reservas-net 
+    healthcheck: 
+      test: 
+        - CMD-SHELL 
+        - mysqladmin ping -h 127.0.0.1 -u root -p"$$MYSQL_ROOT_PASSWORD" --silent 
+      interval: 5s 
+      timeout: 5s 
+      retries: 20 
+      start_period: 40s 
+  
+
+  reservas-api: 
+    container_name: reservas-api 
+    build: 
+      context: ./backend 
+    image: reservas-api:v1 
+    ports: 
+      - "3001:3000" 
+    environment: 
+      PORT: 3000 
+      DB_HOST: reservas-db 
+      DB_PORT: 3306 
+      DB_NAME: reservasdb 
+      DB_USER: reservas_user 
+      DB_PASSWORD: reservas_pass 
+      APP_VERSION: v1 
+      SEED_DEMO: "true" 
+    networks: 
+      - reservas-net 
+    healthcheck: 
+      test: 
+        - CMD 
+        - node 
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" 
+      interval: 5s 
+      timeout: 3s 
+      retries: 10 
+      start_period: 15s 
+    depends_on: 
+      reservas-db: 
+        condition: service_healthy 
+
+
+  reservas-frontend: 
+    container_name: reservas-frontend 
+    build: 
+      context: ./frontend 
+    image: reservas-frontend:v1 
+    ports: 
+      - "3000:8080" 
+    environment: 
+      API_HOST: reservas-api 
+      API_PORT: 3000 
+    networks: 
+      - reservas-net 
+    healthcheck: 
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"] 
+      interval: 5s 
+      timeout: 3s 
+      retries: 5 
+      start_period: 5s 
+    depends_on: 
+      reservas-api: 
+        condition: service_healthy 
+
+
+networks: 
+    reservas-net: 
+      name: reservas-net 
+
+volumes: 
+    reservas-db-data: 
+      name: reservas-db-data
