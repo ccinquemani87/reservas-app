@@ -20,9 +20,9 @@ directamente, y a la API le habla el frontend.
 
 | Imagen | Tag | Estrategia / Base | Tamaño Final | 
 | :--- | :--- | :--- | :--- | 
-| \`reservas-api\` | \`ingenuo\` | Monolítica (\`node:20\`) | 402 MB | 
-| \`reservas-api\` | \`v1\` | Multi-etapa (\`node:20-alpine\` + \`npm ci --omit=dev\`) | 50 MB | 
-| \`reservas-frontend\` | \`v1\` | Multi-etapa (\`node:20-alpine\` -&gt; \`nginx-unprivileged\`) | 21 MB |
+| `reservas-api` | `ingenuo` | Monolítica (`node:20`) | 402 MB | 
+| `reservas-api` | `v1` | Multi-etapa (`node:20-alpine` + `npm ci --omit=dev`) | 50 MB | 
+| `reservas-frontend` | `v1` | Multi-etapa (`node:20-alpine` -&gt; `nginx-unprivileged`) | 21 MB |
 
 
 # Trabajo Práctico N° 3 — Redes y Almacenamiento en Docker
@@ -48,7 +48,7 @@ Al omitir `--network`, el contenedor se conectó a la red `bridge` por defecto, 
 
 ## 8. Orden estricto de arranque, análisis de fallos por inversión y limitaciones 
 
-El orden de arranque obligatorio para garantizar la disponibilidad del sistema es: **Red (`reservas-net`) ➔ Volumen (\`reservas-db-data\`) ➔ Base de datos (\`reservas-db\`) ➔ API (\`reservas-api`) ➔ Frontend (`reservas-frontend`)** 
+El orden de arranque obligatorio para garantizar la disponibilidad del sistema es: **Red (`reservas-net`) ➔ Volumen (`reservas-db-data`) ➔ Base de datos (`reservas-db`) ➔ API (`reservas-api`) ➔ Frontend (`reservas-frontend`)** 
 
 --- 
 
@@ -69,7 +69,7 @@ El orden de arranque obligatorio para garantizar la disponibilidad del sistema e
 
 4. **Invertir API ➔ Frontend:**
   * **Fallo:** Nginx procesa la plantilla y sustituye la directiva `proxy_pass http://${API_HOST}:${API_PORT}/;` al momento de inicializar el contenedor. 
-  * Nginx resuelve el nombre de host del \*upstream\* (\`reservas-api\`) **una única vez durante el arranque**; si el contenedor de la API aún no está creado y registrado en el DNS interno de la red, Nginx no reintenta ni arranca en estado degradado: aborta de forma inmediata (PID 1 finaliza) y el contenedor queda en estado **`Exited (1)`** con el error textual: 
+  * Nginx resuelve el nombre de host del *upstream* (`reservas-api`) **una única vez durante el arranque**; si el contenedor de la API aún no está creado y registrado en el DNS interno de la red, Nginx no reintenta ni arranca en estado degradado: aborta de forma inmediata (PID 1 finaliza) y el contenedor queda en estado **`Exited (1)`** con el error textual: 
 `nginx: [emerg] host not found in upstream "reservas-api" in /etc/nginx/conf.d/default.conf:24`. 
 
 --- 
@@ -79,3 +79,57 @@ El orden de arranque obligatorio para garantizar la disponibilidad del sistema e
 * **Limitación actual:** Toda esta secuencia de dependencias, tiempos de espera y parámetros reside actualmente **en la memoria del operador que tipea los comandos en la terminal**, y no en ningún archivo ejecutable ni declarativo. Si un operador invierte un paso, olvida un flag o no aguarda a que MySQL informe `port: 3306`, la aplicación falla.
 
 * **Resolución (Semana 4):** Esta problemática se resolverá de forma automatizada mediante **Docker Compose**, donde la totalidad de la infraestructura (redes, volúmenes, variables de entorno y orden de inicio con `depends_on` y condiciones de salud `condition: service_healthy`) quedará formalizada en un único archivo declarativo `docker-compose.yml`.
+
+
+
+## Trabajo Práctico N° 4 — Docker Compose y Seguridad Básica
+### 1. Healthchecks sin dependencias añadidas 
+* **Evitar herramientas externas:** No se debe instalar `curl` ni herramientas de diagnóstico dentro de las imágenes solo para evaluar el estado del servicio, ya que agregaría peso innecesario y ampliaría la superficie de ataque con paquetes ajenos a producción [1]. 
+* **Implementación nativa:** 
+    * **`reservas-api`:** Emplea el método `fetch()` incorporado de forma nativa en Node.js (disponible a partir de la versión 18) [1]. 
+    * **`reservas-frontend`:** Utiliza `wget`, el cual ya viene provisto por BusyBox dentro de la imagen base Alpine [1].
+---
+### 2. Orquestación y orden de arranque (`depends_on`) 
+El uso de `depends_on` con `condition: service_healthy` resuelve dos problemáticas diferentes según la capa [1]: 
+* **`reservas-api` sobre `reservas-db`:** La API requiere que el motor MySQL esté listo para aceptar conexiones TCP, algo que la forma simple `depends_on: [reservas-db]` no garantiza (solo espera a que el contenedor se inicie, no a que complete su proceso interno) [1]. Además, la API cuenta con reintentos durante 60 segundos [1]. 
+* **`reservas-frontend` sobre `reservas-api`:** Nginx resuelve el nombre del *upstream* (`reservas-api`) una sola vez al arrancar [2]. La condición `service_healthy` asegura que el proxy inicie con el backend completamente disponible, evitando errores `host not found in upstream` y respuestas HTTP 502 al inicio [1]. 
+
+---
+### 3. Ciclo de vida y persistencia de datos 
+* **`docker compose down`:** Detiene y elimina contenedores y redes, pero **preserva intactos los volúmenes nombrados** y la persistencia de las reservas [3, 4]. 
+* **`docker compose down -v`:** Elimina los contenedores, redes y **destruye de forma irreversible los volúmenes**, eliminando los datos almacenados en MySQL [3, 4]. 
+
+---
+### 4. Variables de entorno y gestión de credenciales 
+* **Riesgo en producción:** Definir contraseñas literales en `docker-compose.yml` expone secretos a cualquier usuario con acceso al repositorio o al host mediante comandos como `docker inspect` [3, 5, 6].* **Solución aplicada:** Se desacoplaron las claves en un archivo `.env` excluido del control de versiones mediante `.gitignore`, documentando el contrato de variables en `.env.example` [3]. En entornos productivos de orquestación, esto se administra mediante objetos nativos como los *Secrets* de Kubernetes [3, 6]. 
+
+--- 
+### 5. Auditoría de seguridad 
+
+#### A. Usuarios de ejecución y privilegios mínimos 
+* **`reservas-api`:** Se ejecuta bajo el usuario sin privilegios `node` (`uid=1000`) [7]. 
+* **`reservas-frontend`:** Corre bajo el usuario sin privilegios `nginx` (`uid=101`) [7]. 
+* **`reservas-db`:** El demonio principal opera con el usuario `mysql`, sin acceso administrativo en el host [7, 8]. 
+
+#### B. Exposición de puertos 
+* **`reservas-db`:** No publica puertos al anfitrión; su comunicación permanece estrictamente aislada dentro de `reservas-net` [7, 9]. 
+* **`reservas-api`:** Expone el puerto `3001` únicamente para fines de depuración directa durante el desarrollo (será puramente interno en Kubernetes) [7]. 
+* **`reservas-frontend`:** Publica `3000:8080`, constituyendo el único punto de entrada público de la aplicación [7, 10]. 
+
+#### C. Escaneo de vulnerabilidades (Trivy) 
+| Imagen | Origen de los hallazgos | Total | Severidad (C / H / M / L) | Con versión corregida (*Fixed Version*) | | :--- | :--- | :---: | :---: | :---: | 
+| **`reservas-api:v1`** | Sistema base (`Alpine 3.23.4`) | **51** | 0 CRIT / 4 HIGH / 15 MED / 32 LOW | Muy pocos parches disponibles en el SO | 
+| **`reservas-api:v1`** | Dependencias de app (`node-pkg`) | **40** | 2 CRIT / 22 HIGH / 13 MED / 3 LOW | La gran mayoría cuenta con parche en npm | 
+| **`reservas-frontend:v1`** | Sistema base (`Alpine 3.21.3`) | **159** | 2 CRIT / 39 HIGH / 76 MED / 42 LOW | Prácticamente todas tienen parche | 
+| **`reservas-frontend:v1`** | Dependencias de app | **0** | 0 CRIT / 0 HIGH / 0 MED / 0 LOW | No aplica (construcción multi-etapa) | 
+
+* **Conclusión de dependencias:** La construcción multi-etapa del frontend eliminó exitosamente Node, npm y `node_modules` de la imagen de producción, resultando en 0 vulnerabilidades de aplicación [11]. Los hallazgos de sistema corresponden a parches pendientes que se solucionan actualizando la imagen base de Alpine. 
+
+--- 
+### 6. Principio de mínimo privilegio con Linux Capabilities 
+Al aplicar `cap_drop: [ALL]` a todos los servicios [12]: 
+* **`reservas-api` y `reservas-frontend`:** Continúan operando con normalidad sin requerir ninguna capability adicional, ya que corren como usuarios no-root [8, 12]. 
+* **`reservas-db`:** Requiere capabilities puntuales agregadas mediante `cap_add` [12]: 
+* **`SETGID`:** Necesaria para cambiar el ID de grupo del proceso inicial a `mysql` [12, 13]. 
+* **`SETUID`:** Necesaria para que el script de inicio descienda los privilegios de `root` al usuario `mysql` [8, 12]. 
+* **`DAC_OVERRIDE`:** Necesaria para inspeccionar y preparar archivos en el directorio de datos ignorando temporalmente las restricciones POSIX de permisos [8, 12].
