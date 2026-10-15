@@ -7,15 +7,16 @@ RUN npm ci --omit=dev
 
 
 # Etapa 2: imagen final mínima 
-FROM node:20-alpine WORKDIR /app 
-ENV NODE\_ENV=production 
-ARG APP\_VERSION=v1 
-ENV APP\_VERSION=${APP\_VERSION} 
+FROM node:20-alpine 
+WORKDIR /app 
+ENV NODE_ENV=production 
+ARG APP_VERSION=v1 
+ENV APP_VERSION=${APP_VERSION} 
 
-COPY --from=deps /app/node\_modules ./node\_modules 
+COPY --from=deps /app/node_modules ./node_modules 
 COPY --chown=node:node . . 
 
 USER node 
 EXPOSE 3000 
-CMD ["node", "src/index.js"]
+CMD ["node", "server.js"]
 
