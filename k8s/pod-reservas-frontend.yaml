@@ -1,0 +1,17 @@
+apiVersion: v1 
+kind: Pod 
+metadata: 
+  name: reservas-frontend 
+  labels: 
+    app: reservas-frontend 
+spec: 
+  containers: 
+    - name: frontend 
+      image: ccinquemani87/reservas-frontend:v1 
+      ports: 
+        - containerPort: 8080 
+      env: 
+        - name: API_HOST 
+          value: "reservas-api" 
+        - name: API_PORT 
+          value: "3000"

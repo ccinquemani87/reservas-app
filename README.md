@@ -133,3 +133,33 @@ Al aplicar `cap_drop: [ALL]` a todos los servicios [12]:
 * **`SETGID`:** Necesaria para cambiar el ID de grupo del proceso inicial a `mysql` [12, 13]. 
 * **`SETUID`:** Necesaria para que el script de inicio descienda los privilegios de `root` al usuario `mysql` [8, 12]. 
 * **`DAC_OVERRIDE`:** Necesaria para inspeccionar y preparar archivos en el directorio de datos ignorando temporalmente las restricciones POSIX de permisos [8, 12].
+
+# Trabajo Práctico N°5 - Kubernetes
+
+## Diagnóstico de Errores e Incidencias 
+
+### 1. Error de descarga de imagen: `ImagePullBackOff` / `ErrImagePull` 
+
+* **Comando ejecutado:** 
+  ```bash 
+  kubectl run test-pull --image=reservas-api:v1
+
+NAME        READY   STATUS              RESTARTS    AGE 
+test-pull   0/1     ImagePullBackOff        0       15s
+Events: 
+Type            Reason          Age                 From                 Message 
+----            ------          ----                ----                 ------- 
+Normal          Scheduled       30s                 default-scheduler    Successfully assigned reservas-app/test-pull to node-01 
+Normal          Pulling         12s (x2 over 28s)   kubelet              Pulling image "reservas-api:v1" 
+Warning         Failed          11s (x2 over 27s)   kubelet              Failed to pull image "reservas-api:v1": rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/reservas-api:v1": not found 
+Warning         Failed          11s (x2 over 27s)   kubelet              Error: ErrImagePull 
+Normal          BackOff         2s (x2 over 26s)    kubelet              Back-off pulling image "reservas-api:v1"
+
+* **Causa Raíz:** Al especificar la imagen como `reservas-api:v1` sin indicar un prefijo de usuario, Kubernetes/cri-o intenta descargarla del registro público oficial (`docker.io/library/reservas-api:v1`), el cual no existe. Dado que el nodo del clúster no tiene la imagen construida localmente, la descarga falla.
+
+* **Solución Aplicada:**
+1. Generar un tag indicando el usuario de Docker Hub: docker tag reservas-api:v1 ccinquemani87/reservas-api:v1
+2. Publicar la imagen en el registry público: docker push ccinquemani87/reservas-api:v1
+3. Hacer referencia a la imagen completa en el manifiesto YAML image: ccinquemani87/reservas-api:v1
+
+### 2. Fallo de resolución DNS y CrashLoopBackOff en la API * **Estado observado:** `reservas-api` cambia de estado a `Error` y luego a `CrashLoopBackOff` tras múltiples reinicios. * **Evidencia en los registros (`kubectl logs reservas-api`):** Error de conexión a la base de datos por fallo de resolución de nombre de host (`getaddrinfo ENOTFOUND reservas-db`). * **Causa Raíz:** En Kubernetes, desplegar Pods independientes (*naked Pods*) no crea automáticamente entradas DNS en el clúster. La variable `DB_HOST=reservas-db` no puede ser resuelta por la API al no existir un objeto de tipo `Service` asociado a la base de datos. * **Conclusión:** Demuestra la imposibilidad de comunicación por nombre entre Pods aislados sin la abstracción de red que proveen los `Services` en Kubernetes.
