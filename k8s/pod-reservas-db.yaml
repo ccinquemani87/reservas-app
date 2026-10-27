@@ -18,4 +18,4 @@ spec:
         - name: MYSQL_USER 
           value: "reservas_user" 
         - name: MYSQL_PASSWORD 
-          value: "reservas\_pass"
+          value: "reservas_pass"

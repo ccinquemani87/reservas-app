@@ -13,8 +13,8 @@ spec:
       env: 
         - name: PORT 
           value: "3000" 
-        - name: DB_HOST 
-          value: "reservas-db" 
+        - name: DB_HOST
+          value: "10.244.0.21" 
         - name: DB_PORT 
           value: "3306" 
         - name: DB_USER 

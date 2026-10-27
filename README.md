@@ -141,7 +141,7 @@ Al aplicar `cap_drop: [ALL]` a todos los servicios [12]:
 ### 1. Error de descarga de imagen: `ImagePullBackOff` / `ErrImagePull` 
 
 * **Comando ejecutado:** 
-  ```bash 
+  ``bash 
   kubectl run test-pull --image=reservas-api:v1
 
 NAME        READY   STATUS              RESTARTS    AGE 
@@ -162,4 +162,87 @@ Normal          BackOff         2s (x2 over 26s)    kubelet              Back-of
 2. Publicar la imagen en el registry público: docker push ccinquemani87/reservas-api:v1
 3. Hacer referencia a la imagen completa en el manifiesto YAML image: ccinquemani87/reservas-api:v1
 
-### 2. Fallo de resolución DNS y CrashLoopBackOff en la API * **Estado observado:** `reservas-api` cambia de estado a `Error` y luego a `CrashLoopBackOff` tras múltiples reinicios. * **Evidencia en los registros (`kubectl logs reservas-api`):** Error de conexión a la base de datos por fallo de resolución de nombre de host (`getaddrinfo ENOTFOUND reservas-db`). * **Causa Raíz:** En Kubernetes, desplegar Pods independientes (*naked Pods*) no crea automáticamente entradas DNS en el clúster. La variable `DB_HOST=reservas-db` no puede ser resuelta por la API al no existir un objeto de tipo `Service` asociado a la base de datos. * **Conclusión:** Demuestra la imposibilidad de comunicación por nombre entre Pods aislados sin la abstracción de red que proveen los `Services` en Kubernetes.
+
+### 2. Fallo de resolución DNS y CrashLoopBackOff en la API 
+
+* **Estado observado:** `reservas-api` cambia de estado a `Error` y luego a `CrashLoopBackOff` tras múltiples reinicios. 
+
+* **Evidencia en los registros (`kubectl logs reservas-api`): ** Error de conexión a la base de datos por fallo de resolución de nombre de host (`getaddrinfo ENOTFOUND reservas-db`). 
+
+* **Causa Raíz:** En Kubernetes, desplegar Pods independientes (*naked Pods*) no crea automáticamente entradas DNS en el clúster. La variable `DB_HOST=reservas-db` no puede ser resuelta por la API al no existir un objeto de tipo `Service` asociado a la base de datos. 
+
+* **Conclusión:** Demuestra la imposibilidad de comunicación por nombre entre Pods aislados sin la abstracción de red que proveen los `Services` en Kubernetes.
+
+
+### 3. Diagnóstico de Errores y Comportamientos Observados
+
+#### A. Diagnóstico de `ImagePullBackOff` / `ErrImagePull`
+
+Se provocó de manera deliberada el error al intentar desplegar un Pod haciendo referencia a una imagen sin prefijo de usuario del registry (`reservas-api:v1`):
+
+```
+kubectl run pod-test --image=reservas-api:v1
+
+```
+
+* **Comando de inspección:** `kubectl describe pod pod-test`
+
+* **Causa raíz identificada en** **Events** **:** El `kubelet` intentó descargar la imagen desde Docker Hub oficial en lugar del repositorio personal. Al no existir la imagen en la ruta oficial, el clúster falló con `ErrImagePull` y pasó al estado de reintento `ImagePullBackOff`.
+
+
+### B. Diagnóstico de `CrashLoopBackOff` en la API (`DB_HOST=reservas-db`)
+
+Al aplicar los manifiestos con la variable `DB_HOST=reservas-db`, el Pod `reservas-api` falló repetidamente quedando en estado `CrashLoopBackOff`.
+
+* **Salida de** **kubectl logs reservas-api** **:** `connect EHOSTUNREACH 10.244.0.10:3306` (o `getaddrinfo ENOTFOUND reservas-db`)
+
+* **Causa raíz:** En Kubernetes, un Pod individual **no proporciona resolución DNS** por nombre a otros Pods. El nombre corto `reservas-db` no es resoluble dentro del clúster sin la presencia de un recurso tipo **Service**.
+
+### C. Prueba con Dirección IP y Volatilidad de las IPs 
+
+Para comprobar la conectividad entre componentes, se reemplazó temporalmente la variable `DB_HOST` en `pod-reservas-api.yaml` por la IP directa asignada al Pod de la base de datos (`10.244.0.21`). Al aplicar el cambio, el Pod `reservas-api` pasó correctamente a estado **`Running`**. 
+
+* **Prueba de volatilidad:** Se eliminó y recreó el Pod de la base de datos (`kubectl delete pod reservas-db`), provocando que Kubernetes le asignara una nueva IP dinámica. Como consecuencia, la API volvió a fallar. 
+
+* **Conclusión:** Las IPs de los Pods son efímeras y descartables, lo que hace imprescindible el uso de **Services** para disponer de un punto de acceso estable. 
+
+--- 
+
+### D. Diagnóstico en el Frontend (`host not found in upstream`) Al desplegar `pod-reservas-frontend.yaml`, el contenedor de Nginx falló indicando `host not found in upstream`. 
+
+* **Causa raíz:** Nginx intentó resolver el nombre DNS del backend (`reservas-api`), pero al no existir un recurso tipo **Service** en el clúster, la resolución falló durante la inicialización del servidor web. 
+
+--- 
+
+### E. Acceso de Diagnóstico mediante `port-forward` Para verificar el funcionamiento de la API de forma aislada, se utilizó la redirección de puertos temporal: ```bash kubectl port-forward pod/reservas-api 3001:3000
+
+**Comprobaciones efectuadas:**
+* `curl -s localhost:3001/health` → Responde con el estado de salud de la aplicación.
+* `curl -s localhost:3001/reservas` → Devuelve la respuesta de la base de datos.
+
+### F. Falta de Supervisión ("Un Pod es mortal")
+
+Al eliminar manualmente el Pod con `kubectl delete pod reservas-api`, el recurso fue destruido definitivamente sin que el clúster intentara recrearlo. Esto confirma que los Pods sueltos carecen de mecanismos de autorreparación y alta disponibilidad
+
+## 4. Comparativa: `docker-compose.yml` vs. Manifiestos K8s (TP5)
+
+| Aspecto               | Docker Compose (TP4)                                    | K8s - Pods Sueltos (TP5)                                 |
+| --------------------- | ------------------------------------------------------- | -------------------------------------------------------- |
+| **Agrupación**        | Definición centralizada en `docker-compose.yml`.        | Manifiestos YAML independientes por Pod.                 |
+| **Resolución DNS**    | Automática por nombre de servicio en la red de Compose. | **Sin DNS.** Requiere recursos de tipo `Service`.        |
+| **Control de Inicio** | `depends_on` con `condition: service_healthy`.          | Sin orden de arranque; la app debe gestionar reintentos. |
+| **Resiliencia**       | Reinicio de contenedores según política.                | Si el Pod se elimina, no se vuelve a crear.              |
+
+
+## 5. Cheatsheet de Comandos `kubectl` Utilizados
+
+1. `kubectl config current-context`: Muestra el clúster y contexto activo.
+2. `kubectl create namespace reservas-app`: Crea el namespace de trabajo.
+3. `kubectl config set-context --current --namespace=reservas-app`: Fija el namespace por defecto.
+4. `kubectl run reservas-db --image=mysql:8.4 --dry-run=client -o yaml &gt; k8s/pod-reservas-db.yaml`: Genera la plantilla YAML del Pod.
+5. `kubectl apply -f k8s/`: Aplica declarativamente todos los manifiestos de la carpeta.
+6. `kubectl get pods -o wide`: Lista los Pods mostrando IP asignada y nodo.
+7. `kubectl describe pod
+
+
+
