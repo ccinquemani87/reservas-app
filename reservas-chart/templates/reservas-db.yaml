@@ -1,0 +1,49 @@
+apiVersion: v1 
+kind: Service 
+metadata: 
+  name: reservas-db 
+spec: 
+  type: ClusterIP 
+  ports: 
+    - port: 3306 
+      targetPort: 3306 
+  selector: 
+    app: reservas-db 
+--- 
+apiVersion: apps/v1 
+kind: Deployment 
+metadata: 
+  name: reservas-db 
+  namespace: reservas-app 
+spec: 
+  replicas: 1
+  selector: 
+    matchLabels: 
+      app: reservas-db 
+  template: 
+    metadata: 
+      labels: 
+        app: reservas-db 
+    spec: 
+      containers: 
+      - name: mysql 
+        image: mysql:8.4 
+        ports: 
+        - containerPort: 3306 
+        envFrom: 
+        - secretRef: 
+            name: reservas-db-secret 
+        env: 
+        - name: MYSQL_DATABASE 
+          valueFrom: 
+            configMapKeyRef: 
+              name: reservas-api-config 
+              key: DB_NAME 
+        volumeMounts: 
+        - mountPath: /var/lib/mysql 
+          name: db-storage 
+          subPath: mysql 
+      volumes: 
+      - name: db-storage 
+        persistentVolumeClaim: 
+          claimName: reservas-db-pvc

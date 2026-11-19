@@ -29,4 +29,7 @@ spec:
         - name: frontend 
           image: ccinquemani87/reservas-frontend:v1 
           ports: 
-            - containerPort: 8080
+          - containerPort: 8080
+          envFrom: 
+          - configMapRef: 
+              name: reservas-frontend-config

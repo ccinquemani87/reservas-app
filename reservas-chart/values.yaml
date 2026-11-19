@@ -1,0 +1,21 @@
+frontend: 
+  replicaCount: 2 
+  image: 
+    repository: ccinquemani87/reservas-frontend 
+    tag: v1 
+
+api: 
+  replicaCount: 2 
+  image: 
+    repository: ccinquemani87/reservas-api 
+    tag: v1 
+
+db: 
+  image: 
+    repository: mysql 
+    tag: "8.4" 
+
+hpa: 
+  minReplicas: 2 
+  maxReplicas: 6 
+  targetCPU: 50
