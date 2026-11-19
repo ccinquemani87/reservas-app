@@ -1,248 +1,238 @@
-## Arquitectura
-navegador ──► reservas-frontend ──────► reservas-api ──────► reservas-db
-React + Vite Node 20 + Express MySQL 8.4
-nginx :8080 :3000 :3306
-(host 3000) (host 3001, solo (sin puerto
-depuración) publicado)
+# Proyecto Integrador: reservas-app — Arquitectura e Infraestructura de Kubernetes con Helm
 
-| Capa | Imagen | Puerto interno | Puerto publicado |
-| --- | --- | --- | --- |
-| `reservas-frontend` | React + Vite servido por nginx | 8080 | 3000 |
-| `reservas-api` | Node 20 + Express | 3000 | 3001 (solo depuración) |
-| `reservas-db` | MySQL 8.4 | 3306 | — |
-El frontend es el único punto de entrada: nadie le habla a la base
-directamente, y a la API le habla el frontend.
+## 1. Resumen Ejecutivo y Ficha Técnica
 
+El presente documento constituye el informe técnico consolidado del **Trabajo Final Integrador** para la asignatura *Contenedores, Docker y Orquestación con Kubernetes*. El proyecto documenta el diseño, empaquetado, despliegue y autoescalado de la infraestructura orientada a microservicios para la aplicación **`reservas-app`** (Variante B).
 
-## TP 2 - Optimización de Imágenes y Multi-stage Builds 
+La aplicación es un sistema de reserva de salas por franja horaria estructurado en tres capas independientes: una interfaz web desarrollada en **React + Vite**, un backend de servicios **REST API en Node 20 + Express**, y un motor de almacenamiento de base de datos relacional en **MySQL 8.4**.
 
-### Tabla Comparativa de Tamaños 
+### Ficha Técnica de la Entrega
 
-| Imagen | Tag | Estrategia / Base | Tamaño Final | 
-| :--- | :--- | :--- | :--- | 
-| `reservas-api` | `ingenuo` | Monolítica (`node:20`) | 402 MB | 
-| `reservas-api` | `v1` | Multi-etapa (`node:20-alpine` + `npm ci --omit=dev`) | 50 MB | 
-| `reservas-frontend` | `v1` | Multi-etapa (`node:20-alpine` -&gt; `nginx-unprivileged`) | 21 MB |
-
-
-# Trabajo Práctico N° 3 — Redes y Almacenamiento en Docker
-
-Se ejecutó el frontend omitiendo el parámetro `--network`:
-
-```
-docker run -d --name reservas-frontend -p 3000:8080 -e API_HOST=reservas-api -e API_PORT=3000 reservas-frontend:v1
-
-```
-
-* Salida de `docker ps -a`: Contenedor en estado `Exited (1)`.
-* Salida de `docker logs reservas-frontend`:
-
-```
-nginx: [emerg] host not found in upstream "reservas-api" in /etc/nginx/conf.d/default.conf:24
-
-```
-
-### Explicación del fallo:
-
-Al omitir `--network`, el contenedor se conectó a la red `bridge` por defecto, la cual no cuenta con resolución DNS interna por nombre de contenedor. Nginx resuelve las direcciones de sus directivas `proxy_pass` una sola vez durante el arranque; al no poder resolver el nombre `reservas-api`, aborta el proceso de inmediato en lugar de iniciar de forma degradada.
-
-## 8. Orden estricto de arranque, análisis de fallos por inversión y limitaciones 
-
-El orden de arranque obligatorio para garantizar la disponibilidad del sistema es: **Red (`reservas-net`) ➔ Volumen (`reservas-db-data`) ➔ Base de datos (`reservas-db`) ➔ API (`reservas-api`) ➔ Frontend (`reservas-frontend`)** 
-
---- 
-
-### ¿Qué falla exactamente al invertir cada paso? 
-
-1. **Invertir Red ➔ Base de datos (o cualquier contenedor):** 
-  * **Fallo:** Si se intenta crear un contenedor asignándole `--network reservas-net` antes de haber creado la red, el comando aborta inmediatamente con: `docker: Error response from daemon: network reservas-net not found`. 
-  * Si en su lugar se omite el parámetro `--network` para arrancarlo primero, el contenedor cae en la red predeterminada (`bridge`), donde no existe resolución DNS por nombre de contenedor, impidiendo que el resto del sistema pueda localizarlo. 
-
-2. **Invertir Volumen ➔ Base de datos:** 
-  * **Fallo:** Si se inicia la base de datos omitiendo el montaje del volumen persistente (`-v reservas-db-data:/var/lib/mysql`), MySQL escribirá sus tablas directamente en la capa de lectura/escritura efímera del contenedor. 
-  * Al eliminar el contenedor con `docker rm -f reservas-db`, se destruyen todas las tablas y datos creados, perdiendo la persistencia del sistema. 
-
-3. **Invertir Base de datos ➔ API:**
-
-  * **Fallo:** Al arrancar con la variable `SEED_DEMO=true`, la API intenta conectarse de inmediato con el motor MySQL para ejecutar las migraciones y sembrar los datos. 
-  * Si la base no existe o aún se encuentra en su fase preliminar de inicialización (servidor temporal en `port: 0`), la API no logra conectarse y registra un error crítico **`ECONNREFUSED`** en sus logs, interrumpiendo o degradando el servicio. 
-
-4. **Invertir API ➔ Frontend:**
-  * **Fallo:** Nginx procesa la plantilla y sustituye la directiva `proxy_pass http://${API_HOST}:${API_PORT}/;` al momento de inicializar el contenedor. 
-  * Nginx resuelve el nombre de host del *upstream* (`reservas-api`) **una única vez durante el arranque**; si el contenedor de la API aún no está creado y registrado en el DNS interno de la red, Nginx no reintenta ni arranca en estado degradado: aborta de forma inmediata (PID 1 finaliza) y el contenedor queda en estado **`Exited (1)`** con el error textual: 
-`nginx: [emerg] host not found in upstream "reservas-api" in /etc/nginx/conf.d/default.conf:24`. 
-
---- 
-
-### Limitación actual y resolución en la Semana 4
-
-* **Limitación actual:** Toda esta secuencia de dependencias, tiempos de espera y parámetros reside actualmente **en la memoria del operador que tipea los comandos en la terminal**, y no en ningún archivo ejecutable ni declarativo. Si un operador invierte un paso, olvida un flag o no aguarda a que MySQL informe `port: 3306`, la aplicación falla.
-
-* **Resolución (Semana 4):** Esta problemática se resolverá de forma automatizada mediante **Docker Compose**, donde la totalidad de la infraestructura (redes, volúmenes, variables de entorno y orden de inicio con `depends_on` y condiciones de salud `condition: service_healthy`) quedará formalizada en un único archivo declarativo `docker-compose.yml`.
-
-
-
-## Trabajo Práctico N° 4 — Docker Compose y Seguridad Básica
-### 1. Healthchecks sin dependencias añadidas 
-* **Evitar herramientas externas:** No se debe instalar `curl` ni herramientas de diagnóstico dentro de las imágenes solo para evaluar el estado del servicio, ya que agregaría peso innecesario y ampliaría la superficie de ataque con paquetes ajenos a producción [1]. 
-* **Implementación nativa:** 
-    * **`reservas-api`:** Emplea el método `fetch()` incorporado de forma nativa en Node.js (disponible a partir de la versión 18) [1]. 
-    * **`reservas-frontend`:** Utiliza `wget`, el cual ya viene provisto por BusyBox dentro de la imagen base Alpine [1].
----
-### 2. Orquestación y orden de arranque (`depends_on`) 
-El uso de `depends_on` con `condition: service_healthy` resuelve dos problemáticas diferentes según la capa [1]: 
-* **`reservas-api` sobre `reservas-db`:** La API requiere que el motor MySQL esté listo para aceptar conexiones TCP, algo que la forma simple `depends_on: [reservas-db]` no garantiza (solo espera a que el contenedor se inicie, no a que complete su proceso interno) [1]. Además, la API cuenta con reintentos durante 60 segundos [1]. 
-* **`reservas-frontend` sobre `reservas-api`:** Nginx resuelve el nombre del *upstream* (`reservas-api`) una sola vez al arrancar [2]. La condición `service_healthy` asegura que el proxy inicie con el backend completamente disponible, evitando errores `host not found in upstream` y respuestas HTTP 502 al inicio [1]. 
+| Parámetro | Detalle de Infraestructura |
+| :--- | :--- |
+| **Repositorio de Código** | `reservas-app/` |
+| **Etiqueta Git (Tag)** | `entrega-final` |
+| **Variante de Proyecto** | Variante B (`reservas-app`: React + Express + MySQL) |
+| **Empaquetado** | Helm Chart (`reservas-chart/`) |
+| **Cantidad de Objetos Kubernetes** | 12 objetos oficiales empaquetados |
+| **Ambiente de Despliegue** | Clúster Kubernetes con Ingress Controller y Metrics Server |
 
 ---
-### 3. Ciclo de vida y persistencia de datos 
-* **`docker compose down`:** Detiene y elimina contenedores y redes, pero **preserva intactos los volúmenes nombrados** y la persistencia de las reservas [3, 4]. 
-* **`docker compose down -v`:** Elimina los contenedores, redes y **destruye de forma irreversible los volúmenes**, eliminando los datos almacenados en MySQL [3, 4]. 
+
+## 2. Arquitectura del Sistema de Tres Capas
+
+La infraestructura de `reservas-app` se diseñó bajo el principio de desacoplamiento de capas, aislamiento de servicios y mínimo privilegio de acceso a los datos. La aplicación opera mediante el flujo de tráfico entrante a través del controlador Ingress hacia el clúster.
+
+```
+                           [ Cliente / Navegador ]
+                                      |
+                                      v (HTTP / reservas.local)
+                         +--------------------------+
+                         | Ingress Controller Nginx |
+                         +--------------------------+
+                               /              \
+                   /api/reservas /              \ /
+                                /                \
+                               v                  v
+                   +-------------------+   +-----------------------+
+                   | Service (API)     |   | Service (Frontend)    |
+                   | reservas-api:3000 |   | reservas-frontend:80  |
+                   +-------------------+   +-----------------------+
+                             |                         |
+                             v                         v
+                   +-------------------+   +-----------------------+
+                   | Deployment (API)  |   | Deployment (Frontend) |
+                   | Express (Node 20) |   | React + Nginx         |
+                   | [HPA: 2 a 6 Pods] |   | [2 Réplicas]          |
+                   +-------------------+   +-----------------------+
+                             |
+                             v (MySQL TCP 3306)
+                   +-------------------+
+                   | Service (DB)      |
+                   | reservas-db:3306  |
+                   +-------------------+
+                             |
+                             v
+                   +-------------------+
+                   | Deployment (DB)   |
+                   | MySQL 8.4         |
+                   +-------------------+
+                             |
+                             v (PV / Storage)
+                   +-------------------+
+                   | PVC 1Gi           |
+                   | reservas-db-pvc   |
+                   +-------------------+
+```
+
+### Flujo y Comunicación entre Componentes
+
+1. **Capa de Entrada (Ingress Controller)**: Recibe las peticiones externas en el puerto 80 del host `reservas.local`. Rutea el tráfico `/api` directamente hacia el Service de la API y el tráfico raíz `/` hacia el Service del Frontend.
+2. **Capa de Presentación (Frontend)**: Imagen multi-etapa optimizada basada en `nginxinc/nginx-unprivileged:alpine`. Sirve los archivos estáticos compilados de React y actúa como proxy inverso interno sin exponer directamente la API al exterior.
+3. **Capa de Negocio (REST API)**: Proceso Express en Node 20 en ejecutor sin privilegios (`node`). Gestiona la lógica de negocios y la siembra/consulta de reservas hacia MySQL. Esta capa no conserva estado y escala dinámicamente según la demanda de CPU.
+4. **Capa de Datos (Base de Datos MySQL)**: Instancia relacional MySQL 8.4 aislada dentro del clúster. No publica ningún puerto fuera de la red interna del clúster (`ClusterIP`) y almacena de forma persistente sus tablas mediante un `PersistentVolumeClaim`.
 
 ---
-### 4. Variables de entorno y gestión de credenciales 
-* **Riesgo en producción:** Definir contraseñas literales en `docker-compose.yml` expone secretos a cualquier usuario con acceso al repositorio o al host mediante comandos como `docker inspect` [3, 5, 6].* **Solución aplicada:** Se desacoplaron las claves en un archivo `.env` excluido del control de versiones mediante `.gitignore`, documentando el contrato de variables en `.env.example` [3]. En entornos productivos de orquestación, esto se administra mediante objetos nativos como los *Secrets* de Kubernetes [3, 6]. 
 
---- 
-### 5. Auditoría de seguridad 
+## 3. Inventario y Detalle de los 12 Objetos de Kubernetes
 
-#### A. Usuarios de ejecución y privilegios mínimos 
-* **`reservas-api`:** Se ejecuta bajo el usuario sin privilegios `node` (`uid=1000`) [7]. 
-* **`reservas-frontend`:** Corre bajo el usuario sin privilegios `nginx` (`uid=101`) [7]. 
-* **`reservas-db`:** El demonio principal opera con el usuario `mysql`, sin acceso administrativo en el host [7, 8]. 
+El proyecto integrador se encuentra empaquetado y gestionado a través de **12 objetos de Kubernetes**, declarados como plantillas dentro de `reservas-chart/templates/`.
 
-#### B. Exposición de puertos 
-* **`reservas-db`:** No publica puertos al anfitrión; su comunicación permanece estrictamente aislada dentro de `reservas-net` [7, 9]. 
-* **`reservas-api`:** Expone el puerto `3001` únicamente para fines de depuración directa durante el desarrollo (será puramente interno en Kubernetes) [7]. 
-* **`reservas-frontend`:** Publica `3000:8080`, constituyendo el único punto de entrada público de la aplicación [7, 10]. 
+### Tabla del Inventario de Objetos
 
-#### C. Escaneo de vulnerabilidades (Trivy) 
-| Imagen | Origen de los hallazgos | Total | Severidad (C / H / M / L) | Con versión corregida (*Fixed Version*) | | :--- | :--- | :---: | :---: | :---: | 
-| **`reservas-api:v1`** | Sistema base (`Alpine 3.23.4`) | **51** | 0 CRIT / 4 HIGH / 15 MED / 32 LOW | Muy pocos parches disponibles en el SO | 
-| **`reservas-api:v1`** | Dependencias de app (`node-pkg`) | **40** | 2 CRIT / 22 HIGH / 13 MED / 3 LOW | La gran mayoría cuenta con parche en npm | 
-| **`reservas-frontend:v1`** | Sistema base (`Alpine 3.21.3`) | **159** | 2 CRIT / 39 HIGH / 76 MED / 42 LOW | Prácticamente todas tienen parche | 
-| **`reservas-frontend:v1`** | Dependencias de app | **0** | 0 CRIT / 0 HIGH / 0 MED / 0 LOW | No aplica (construcción multi-etapa) | 
+| # | Tipo de Objeto | Nombre del Recurso | Función y Descripción Técnica |
+| :---: | :--- | :--- | :--- |
+| **1** | `Secret` | `reservas-db-secret` | Almacena credenciales sensibles de la base de datos (`MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD`) codificadas en Base64. |
+| **2** | `PersistentVolumeClaim` | `reservas-db-pvc` | Solicita 1 GiB de almacenamiento persistente (`ReadWriteOnce`) para montar en `/var/lib/mysql` de la base de datos. |
+| **3** | `ConfigMap` | `reservas-api-config` | Mantiene variables de entorno no sensibles de la API (`DB_HOST`, `DB_PORT`, `DB_NAME`, `PORT`). |
+| **4** | `ConfigMap` | `reservas-frontend-config` | Almacena parámetros de ruteo y proxy para el frontend (`API_HOST`, `API_PORT`). |
+| **5** | `Deployment` | `reservas-db` | Garantiza la ejecución de 1 réplica de MySQL 8.4 con volumen montado y credenciales inyectadas. |
+| **6** | `Service` | `reservas-db` | Abstrae la dirección IP del pod de base de datos bajo un nombre DNS interno estable (`reservas-db:3306`). |
+| **7** | `Deployment` | `reservas-api` | Gestiona las réplicas del backend de Node.js con solicitudes de recursos (`cpu: 100m`) para HPA. |
+| **8** | `Service` | `reservas-api` | Provee un punto de acceso balanceado interno (`ClusterIP`) hacia las réplicas de la API en el puerto 3000. |
+| **9** | `Deployment` | `reservas-frontend` | Mantiene 2 réplicas del servidor web Nginx sirviendo la aplicación web interactiva React. |
+| **10** | `Service` | `reservas-frontend` | Publica la capa web de forma interna (`ClusterIP`) en el puerto 80 para ser alcanzada por Ingress. |
+| **11** | `Ingress` | `reservas-app-ingress` | Define las reglas de ruteo HTTP por host (`reservas.local`) y path prefix hacia los Services correspondientes. |
+| **12** | `HorizontalPodAutoscaler` | `reservas-api-hpa` | Regula automáticamente el número de réplicas del Deployment `reservas-api` entre 2 y 6 según el uso de CPU (umbral: 50%). |
 
-* **Conclusión de dependencias:** La construcción multi-etapa del frontend eliminó exitosamente Node, npm y `node_modules` de la imagen de producción, resultando en 0 vulnerabilidades de aplicación [11]. Los hallazgos de sistema corresponden a parches pendientes que se solucionan actualizando la imagen base de Alpine. 
+---
 
---- 
-### 6. Principio de mínimo privilegio con Linux Capabilities 
-Al aplicar `cap_drop: [ALL]` a todos los servicios [12]: 
-* **`reservas-api` y `reservas-frontend`:** Continúan operando con normalidad sin requerir ninguna capability adicional, ya que corren como usuarios no-root [8, 12]. 
-* **`reservas-db`:** Requiere capabilities puntuales agregadas mediante `cap_add` [12]: 
-* **`SETGID`:** Necesaria para cambiar el ID de grupo del proceso inicial a `mysql` [12, 13]. 
-* **`SETUID`:** Necesaria para que el script de inicio descienda los privilegios de `root` al usuario `mysql` [8, 12]. 
-* **`DAC_OVERRIDE`:** Necesaria para inspeccionar y preparar archivos en el directorio de datos ignorando temporalmente las restricciones POSIX de permisos [8, 12].
+## 4. Fundamentos Técnicos y Decisiones de Diseño
 
-# Trabajo Práctico N°5 - Kubernetes
+### 4.1. Seguridad y Gestión de Credenciales
 
-## Diagnóstico de Errores e Incidencias 
+* **Separación de Sensibilidad**: Los valores de configuración no sensibles se ubican en `ConfigMap` (`reservas-api-config` y `reservas-frontend-config`), mientras que las contraseñas del motor relacional se aíslan en `reservas-db-secret`.
+* **Transformación y Mapeo de Variables**: El Secret `reservas-db-secret` define las claves que la imagen oficial de MySQL espera (`MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD`). Al inyectar estas credenciales en el Deployment de `reservas-api`, se utiliza la directiva `valueFrom.secretKeyRef` para renombrarlas al estándar que espera la API (`DB_USER`, `DB_PASSWORD`).
+* **Principio de Mínimo Privilegio**: Ningún contenedor corre como `root`. Las imágenes creadas (`reservas-api` y `reservas-frontend`) ejecutan sus procesos bajo usuarios no privilegiados dedicados (`node` y `nginx` respectivamente). La base de datos MySQL no publica ningún puerto hacia el exterior (`NodePort` ni `LoadBalancer`), quedando restringida de manera exclusiva a la red interna del clúster.
+* **Transparencia sobre Secrets**: Se documenta que un objeto `Secret` en Kubernetes aplica codificación Base64 y no cifrado criptográfico automático en reposo. Para un entorno de producción estricto, se requeriría habilitar la encriptación en reposo dentro de `etcd` o integrar gestores externos de secretos como HashiCorp Vault.
 
-### 1. Error de descarga de imagen: `ImagePullBackOff` / `ErrImagePull` 
+### 4.2. Persistencia del Dato y Estado de los Contenedores
 
-* **Comando ejecutado:** 
-  ``bash 
-  kubectl run test-pull --image=reservas-api:v1
+* **Desacoplamiento de Persistencia**: Las capas de API REST y Frontend React son estrictamente *stateless* (sin estado). Si un pod de la API o del Frontend falla o se elimina, Kubernetes crea un reemplazo idéntico sin pérdida de datos.
+* **Persistencia en MySQL (Stateful)**: Dado que los contenedores son efímeros, la eliminación de un pod de base de datos destruiría las reservas creadas de no contar con un volumen externo. La capa de datos implementa un `PersistentVolumeClaim` denominado `reservas-db-pvc` montado en el directorio `/var/lib/mysql`. Esto garantiza que, incluso si el pod `reservas-db` se destruye y el Deployment recrea la réplica, el nuevo pod se reconecta automáticamente al mismo PersistentVolume preservando todas las tablas e información de reservas.
 
-NAME        READY   STATUS              RESTARTS    AGE 
-test-pull   0/1     ImagePullBackOff        0       15s
-Events: 
-Type            Reason          Age                 From                 Message 
-----            ------          ----                ----                 ------- 
-Normal          Scheduled       30s                 default-scheduler    Successfully assigned reservas-app/test-pull to node-01 
-Normal          Pulling         12s (x2 over 28s)   kubelet              Pulling image "reservas-api:v1" 
-Warning         Failed          11s (x2 over 27s)   kubelet              Failed to pull image "reservas-api:v1": rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/reservas-api:v1": not found 
-Warning         Failed          11s (x2 over 27s)   kubelet              Error: ErrImagePull 
-Normal          BackOff         2s (x2 over 26s)    kubelet              Back-off pulling image "reservas-api:v1"
+### 4.3. Dependencias de Arranque y Ordenamiento en Kubernetes
 
-* **Causa Raíz:** Al especificar la imagen como `reservas-api:v1` sin indicar un prefijo de usuario, Kubernetes/cri-o intenta descargarla del registro público oficial (`docker.io/library/reservas-api:v1`), el cual no existe. Dado que el nodo del clúster no tiene la imagen construida localmente, la descarga falla.
+En entornos como Docker Compose existía la directiva `depends_on: condition: service_healthy` para forzar la secuencia de arranque. En Kubernetes, dicha directiva no existe y la arquitectura debe ser naturalmente tolerante a fallas de ordenamiento:
 
-* **Solución Aplicada:**
-1. Generar un tag indicando el usuario de Docker Hub: docker tag reservas-api:v1 ccinquemani87/reservas-api:v1
-2. Publicar la imagen en el registry público: docker push ccinquemani87/reservas-api:v1
-3. Hacer referencia a la imagen completa en el manifiesto YAML image: ccinquemani87/reservas-api:v1
+* **Tolerancia a Conexión en API**: La API Express reintenta la conexión a MySQL durante un periodo inicial en caso de que el motor de base de datos se encuentre inicializando.
+* **Resolución DNS en Nginx (Frontend)**: El servidor Nginx resuelve el nombre del upstream al iniciar. Si el Service de la API no existe antes de levantar el pod del frontend, Nginx arroja el error `host not found in upstream` y se detiene. Por esta razón, en Kubernetes y en la estructura del Helm Chart, los objetos de red (`Services`) se declaran e instancian **antes** que los controladores de carga (`Deployments`).
 
+### 4.4. Autoescalado Horizontal (HPA) y Especificación de Recursos
 
-### 2. Fallo de resolución DNS y CrashLoopBackOff en la API 
+* **Rol de `resources.requests`**: El controlador `HorizontalPodAutoscaler` calcula el porcentaje de consumo de la CPU utilizando la relación entre el uso real (obtenido desde `metrics-server`) y el valor declarado en `requests.cpu` del contenedor.
+* **Solución al Estado `<unknown>`**: Si el Deployment `reservas-api` omite la sección `resources.requests`, el HPA carece de denominador matemático para la ecuación y la métrica informa indefinidamente `<unknown>`. Para habilitar el autoescalado, se especificó explícitamente:
+  ```yaml
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "250m"
+      memory: "128Mi"
+  ```
+* **Dinámica de Escalado**: Se fijó un piso de 2 réplicas y un techo de 6 réplicas para `reservas-api`, activando el escalado cuando el consumo medio de CPU supera el 50%. El escalado ascendente se ejecuta de manera acelerada al detectar picos de tráfico, mientras que el escalado descendente aplica una ventana de estabilización por defecto (5 minutos) para evitar oscilaciones innecesarias (*flapping*).
 
-* **Estado observado:** `reservas-api` cambia de estado a `Error` y luego a `CrashLoopBackOff` tras múltiples reinicios. 
+---
 
-* **Evidencia en los registros (`kubectl logs reservas-api`): ** Error de conexión a la base de datos por fallo de resolución de nombre de host (`getaddrinfo ENOTFOUND reservas-db`). 
+## 5. Empaquetado, Parametrización y Operación con Helm
 
-* **Causa Raíz:** En Kubernetes, desplegar Pods independientes (*naked Pods*) no crea automáticamente entradas DNS en el clúster. La variable `DB_HOST=reservas-db` no puede ser resuelta por la API al no existir un objeto de tipo `Service` asociado a la base de datos. 
+### 5.1. Estructura del Chart (`reservas-chart/`)
 
-* **Conclusión:** Demuestra la imposibilidad de comunicación por nombre entre Pods aislados sin la abstracción de red que proveen los `Services` en Kubernetes.
-
-
-### 3. Diagnóstico de Errores y Comportamientos Observados
-
-#### A. Diagnóstico de `ImagePullBackOff` / `ErrImagePull`
-
-Se provocó de manera deliberada el error al intentar desplegar un Pod haciendo referencia a una imagen sin prefijo de usuario del registry (`reservas-api:v1`):
+El conjunto completo de recursos se consolidó en la estructura estándar de Helm:
 
 ```
-kubectl run pod-test --image=reservas-api:v1
-
+reservas-chart/
+├── Chart.yaml
+├── values.yaml
+└── templates/
+    ├── configmap-api.yaml
+    ├── configmap-frontend.yaml
+    ├── hpa-api.yaml
+    ├── ingress.yaml
+    ├── pvc-db.yaml
+    ├── reservas-api.yaml
+    ├── reservas-db.yaml
+    ├── reservas-frontend.yaml
+    └── secret-db.yaml
 ```
 
-* **Comando de inspección:** `kubectl describe pod pod-test`
+### 5.2. Parametrización en `values.yaml`
 
-* **Causa raíz identificada en** **Events** **:** El `kubelet` intentó descargar la imagen desde Docker Hub oficial en lugar del repositorio personal. Al no existir la imagen en la ruta oficial, el clúster falló con `ErrImagePull` y pasó al estado de reintento `ImagePullBackOff`.
+Para garantizar que la release sea reutilizable en entornos de desarrollo, staging y producción sin modificar las plantillas YAML, se centralizaron las variables en `values.yaml`:
 
+```yaml
+frontend:
+  replicaCount: 2
+  image:
+    repository: ccinquemani87/reservas-frontend
+    tag: v1
 
-### B. Diagnóstico de `CrashLoopBackOff` en la API (`DB_HOST=reservas-db`)
+api:
+  replicaCount: 2
+  image:
+    repository: ccinquemani87/reservas-api
+    tag: v1
 
-Al aplicar los manifiestos con la variable `DB_HOST=reservas-db`, el Pod `reservas-api` falló repetidamente quedando en estado `CrashLoopBackOff`.
+db:
+  image:
+    repository: mysql
+    tag: "8.4"
 
-* **Salida de** **kubectl logs reservas-api** **:** `connect EHOSTUNREACH 10.244.0.10:3306` (o `getaddrinfo ENOTFOUND reservas-db`)
+hpa:
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPU: 50
+```
 
-* **Causa raíz:** En Kubernetes, un Pod individual **no proporciona resolución DNS** por nombre a otros Pods. El nombre corto `reservas-db` no es resoluble dentro del clúster sin la presencia de un recurso tipo **Service**.
+### 5.3. Guía de Operaciones del Ciclo de Vida con Helm
 
-### C. Prueba con Dirección IP y Volatilidad de las IPs 
+#### 1. Validación e Inspección de Manifiestos
+Antes de instalar, se simula el renderizado de los 12 manifiestos procesando las variables de `values.yaml`:
 
-Para comprobar la conectividad entre componentes, se reemplazó temporalmente la variable `DB_HOST` en `pod-reservas-api.yaml` por la IP directa asignada al Pod de la base de datos (`10.244.0.21`). Al aplicar el cambio, el Pod `reservas-api` pasó correctamente a estado **`Running`**. 
+```bash
+helm template reservas-app ./reservas-chart
+```
 
-* **Prueba de volatilidad:** Se eliminó y recreó el Pod de la base de datos (`kubectl delete pod reservas-db`), provocando que Kubernetes le asignara una nueva IP dinámica. Como consecuencia, la API volvió a fallar. 
+#### 2. Instalación de la Release
+Se despliega la release en el namespace objetivo:
 
-* **Conclusión:** Las IPs de los Pods son efímeras y descartables, lo que hace imprescindible el uso de **Services** para disponer de un punto de acceso estable. 
+```bash
+helm install reservas-app ./reservas-chart -n reservas-app
+```
 
---- 
+#### 3. Verificación de Recursos Desplegados
+Se comprueba que los 12 recursos hayan sido creados correctamente bajo la gestión de Helm:
 
-### D. Diagnóstico en el Frontend (`host not found in upstream`) Al desplegar `pod-reservas-frontend.yaml`, el contenedor de Nginx falló indicando `host not found in upstream`. 
+```bash
+kubectl get all,cm,secret,pvc,ingress,hpa -n reservas-app
+```
 
-* **Causa raíz:** Nginx intentó resolver el nombre DNS del backend (`reservas-api`), pero al no existir un recurso tipo **Service** en el clúster, la resolución falló durante la inicialización del servidor web. 
+#### 4. Actualización Progresiva (Upgrade)
+Se simula la actualización de la versión del backend modificando la etiqueta de la imagen a `v2` en tiempo de ejecución:
 
---- 
+```bash
+helm upgrade reservas-app ./reservas-chart --set api.image.tag=v2 -n reservas-app
+```
 
-### E. Acceso de Diagnóstico mediante `port-forward` Para verificar el funcionamiento de la API de forma aislada, se utilizó la redirección de puertos temporal: ```bash kubectl port-forward pod/reservas-api 3001:3000
+#### 5. Inspección del Historial de Releases
+Se consulta el registro de revisiones gestionado por Helm:
 
-**Comprobaciones efectuadas:**
-* `curl -s localhost:3001/health` → Responde con el estado de salud de la aplicación.
-* `curl -s localhost:3001/reservas` → Devuelve la respuesta de la base de datos.
+```bash
+helm history reservas-app -n reservas-app
+```
 
-### F. Falta de Supervisión ("Un Pod es mortal")
+#### 6. Reversión de Cambios (Rollback)
+Ante cualquier falla en una actualización, se restablece el clúster a la Revisión 1:
 
-Al eliminar manualmente el Pod con `kubectl delete pod reservas-api`, el recurso fue destruido definitivamente sin que el clúster intentara recrearlo. Esto confirma que los Pods sueltos carecen de mecanismos de autorreparación y alta disponibilidad
+```bash
+helm rollback reservas-app 1 -n reservas-app
+```
 
-## 4. Comparativa: `docker-compose.yml` vs. Manifiestos K8s (TP5)
+---
 
-| Aspecto               | Docker Compose (TP4)                                    | K8s - Pods Sueltos (TP5)                                 |
-| --------------------- | ------------------------------------------------------- | -------------------------------------------------------- |
-| **Agrupación**        | Definición centralizada en `docker-compose.yml`.        | Manifiestos YAML independientes por Pod.                 |
-| **Resolución DNS**    | Automática por nombre de servicio en la red de Compose. | **Sin DNS.** Requiere recursos de tipo `Service`.        |
-| **Control de Inicio** | `depends_on` con `condition: service_healthy`.          | Sin orden de arranque; la app debe gestionar reintentos. |
-| **Resiliencia**       | Reinicio de contenedores según política.                | Si el Pod se elimina, no se vuelve a crear.              |
+## 6. Conclusión
 
+El proyecto integrador **`reservas-app`** demuestra el ciclo completo de modernización e ingeniería de infraestructura cloud-native: desde la contenerización multi-etapa y el aislamiento en entornos aislados de Docker, hasta el despliegue orquestado, tolerante a fallos, autoescalable y empaquetado profesionalmente con Helm en Kubernetes.
 
-## 5. Cheatsheet de Comandos `kubectl` Utilizados
-
-1. `kubectl config current-context`: Muestra el clúster y contexto activo.
-2. `kubectl create namespace reservas-app`: Crea el namespace de trabajo.
-3. `kubectl config set-context --current --namespace=reservas-app`: Fija el namespace por defecto.
-4. `kubectl run reservas-db --image=mysql:8.4 --dry-run=client -o yaml &gt; k8s/pod-reservas-db.yaml`: Genera la plantilla YAML del Pod.
-5. `kubectl apply -f k8s/`: Aplica declarativamente todos los manifiestos de la carpeta.
-6. `kubectl get pods -o wide`: Lista los Pods mostrando IP asignada y nodo.
-7. `kubectl describe pod
-
-
-
+Los 12 objetos de infraestructura cumplen estrictamente con los estándares de seguridad, alta disponibilidad, persistencia de datos y mantenibilidad exigidos para entornos de producción.
